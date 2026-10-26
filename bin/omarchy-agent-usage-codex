@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+"""Codex usage collector for the peti.agents panel.
+
+The packaged collector reads the app-server with a buffered readline(). Codex
+often writes a notification and the reply in one chunk; Python pulls both into
+its buffer, select() never sees the reply, and the probe times out. The panel
+then stays on "Codex limits unavailable" with the method name ("account/read")
+as the only explanation.
+
+This runs the packaged collector unchanged apart from that read, and writes
+the record the panel watches.
+"""
+
+import importlib.util
+import io
+import json
+import os
+import select
+import sys
+import time
+from contextlib import redirect_stdout
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+STOCK = os.environ.get("OMARCHY_CODEX_COLLECTOR", "/usr/bin/omarchy-agent-usage-codex")
+USAGE_DIR = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state")) / "omarchy/agents/usage"
+
+
+def rpc_request(proc, request_id, method, params=None, timeout=8):
+    payload = {"id": request_id, "method": method, "params": params or {}}
+    try:
+        proc.stdin.write(json.dumps(payload) + "\n")
+        proc.stdin.flush()
+    except OSError as exc:
+        raise TimeoutError(method) from exc
+
+    # Read the raw fd and split lines here. A buffered readline() hides every
+    # line after the first from select(), so the matching reply sits unread
+    # until the deadline.
+    fd = proc.stdout.fileno()
+    pending = getattr(proc, "_rpc_pending", b"")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                try:
+                    message = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(message, dict) and message.get("id") == request_id:
+                    return message
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], min(0.25, remaining))
+            if not ready:
+                if proc.poll() is not None:
+                    raise TimeoutError(method)
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                raise TimeoutError(method)
+            pending += chunk
+    finally:
+        proc._rpc_pending = pending
+    raise TimeoutError(method)
+
+
+def load_stock():
+    # The packaged collector has no .py suffix, so the path-based finder
+    # refuses it. Load it explicitly and replace only the broken reader.
+    loader = SourceFileLoader("omarchy_agent_usage_codex_stock", STOCK)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError(f"could not load {STOCK}")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.rpc_request = rpc_request
+    return module
+
+
+def main():
+    write = False
+    argv = [sys.argv[0]]
+    for arg in sys.argv[1:]:
+        if arg == "--write":
+            write = True
+        else:
+            argv.append(arg)
+    sys.argv = argv
+
+    module = load_stock()
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        module.main()
+    record = captured.getvalue()
+    if not record.strip():
+        raise SystemExit("omarchy-agent-usage-codex: collector produced no record")
+    json.loads(record)
+
+    if not write:
+        sys.stdout.write(record if record.endswith("\n") else record + "\n")
+        return
+
+    USAGE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = USAGE_DIR / f".codex.{os.getpid()}"
+    tmp.write_text(record if record.endswith("\n") else record + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(USAGE_DIR / "codex.json")
+
+
+if __name__ == "__main__":
+    main()

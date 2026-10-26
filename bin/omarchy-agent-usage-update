@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Runs the stock omarchy-agent-usage-update, then this plugin's own
+# collectors (bin/omarchy-agent-usage-<agent>), honoring the same
+# [--except <agent>] [agent...] selection. The stock updater only discovers
+# collectors in $OMARCHY_PATH/bin, so plugin collectors are run here.
+
+plugin_bin="$(dirname "$(readlink -f "$0")")"
+
+only=()
+flags=()
+declare -A excluded
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+  --force | --limits-only) flags+=("${args[i]}") ;;
+  --except)
+    if [[ -z ${args[i + 1]:-} || ${args[i + 1]} == --* ]]; then
+      echo "omarchy-agent-usage-update: --except requires an agent" >&2
+      exit 2
+    fi
+    excluded[${args[i + 1]}]=1
+    ((i++))
+    ;;
+  *) only+=("${args[i]}") ;;
+  esac
+done
+
+wanted() {
+  [[ -n ${excluded[$1]} ]] && return 1
+  (( ${#only[@]} == 0 )) && return 0
+  local candidate
+  for candidate in "${only[@]}"; do
+    [[ $candidate == "$1" ]] && return 0
+  done
+  return 1
+}
+
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+# The packaged Codex collector times out on account/read. This plugin's
+# collector owns that record, so the stock run must not write it afterwards.
+stock_args=("$@")
+if [[ -x $plugin_bin/omarchy-agent-usage-codex ]] && wanted codex; then
+  stock_args+=(--except codex)
+fi
+"$OMARCHY_PATH/bin/omarchy-agent-usage-update" "${stock_args[@]}"
+status=$?
+
+for collector in "$plugin_bin"/omarchy-agent-usage-*; do
+  agent="${collector##*/omarchy-agent-usage-}"
+  [[ $agent == "update" || ! -x $collector ]] && continue
+  wanted "$agent" || continue
+  "$collector" "${flags[@]}" --write || { echo "omarchy-agent-usage-update: $agent collector failed" >&2; status=1; }
+done
+
+exit $status

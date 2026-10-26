@@ -1,0 +1,55 @@
+#!/bin/bash
+# Read the shared Grok allowance using the existing Grok Build sign-in.
+# Credentials travel only through stdin to curl, never arguments or files.
+set -euo pipefail
+
+grok_home="${GROK_HOME:-$HOME/.grok}"
+cached="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage/grok.json"
+
+unavailable() {
+  local status="$1" help="$2" retry="$3"
+  if [[ $retry == true && -f $cached ]]; then
+    jq --arg status "$status" --arg help "$help" '
+      {limits: (.limits // []), usageStatusText: $status,
+       authHelpText: $help, retryAdvised: true}' "$cached"
+  else
+    jq -n --arg status "$status" --arg help "$help" --argjson retry "$retry" '
+      {limits: [], usageStatusText: $status, authHelpText: $help, retryAdvised: $retry}'
+  fi
+}
+
+if ! [[ -f $grok_home/auth.json ]] || ! jq -e '
+  any(.[]; .auth_mode == "oidc" and (.key | type == "string" and length > 0))
+  ' "$grok_home/auth.json" >/dev/null 2>&1; then
+  unavailable "Waiting for auth" "Run grok login to read account limits." false
+  exit 0
+fi
+
+if ! response=$(jq -r '
+    [.[] | select(.auth_mode == "oidc" and (.key | type == "string" and length > 0))][0].key
+    | "Authorization: Bearer " + .
+  ' "$grok_home/auth.json" |
+  curl --silent --show-error --max-time 15 --header @- --write-out '\n%{http_code}' \
+    'https://cli-chat-proxy.grok.com/v1/billing?format=credits'); then
+  unavailable "Grok limits unavailable" "Could not reach Grok. Retrying shortly; any displayed limits are from the last successful refresh." true
+  exit 0
+fi
+
+code="${response##*$'\n'}"
+body="${response%$'\n'*}"
+if [[ $code == 401 ]]; then
+  unavailable "Sign-in expired" "Open Grok Build to refresh your sign-in, or run grok login." false
+elif [[ $code != 200 ]] || ! jq -e '
+  .config.creditUsagePercent | type == "number" and . >= 0
+  ' >/dev/null 2>&1 <<<"$body"; then
+  unavailable "Grok limits unavailable" "Grok did not return an allowance. Retrying shortly; any displayed limits are from the last successful refresh." true
+else
+  jq '
+    .config as $c
+    | {limits: [{
+        label: (if $c.currentPeriod.type == "USAGE_PERIOD_TYPE_MONTHLY" then "Monthly" else "Weekly" end),
+        percent: ($c.creditUsagePercent / 100),
+        resetsAt: ($c.currentPeriod.end // "")
+      }], usageStatusText: "", authHelpText: "", retryAdvised: false}
+  ' <<<"$body"
+fi
