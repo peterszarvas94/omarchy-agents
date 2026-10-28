@@ -10,10 +10,16 @@ label comes from the local settings cache. Open Grok Build to refresh an
 expired sign-in.
 The stock plugin stays unchanged.
 
+OpenCode usage comes from the CLI's own database, and the OpenCode Go
+allowance from the Console usage endpoint, reusing the Console sign-in the
+CLI already has. Go shows the 5-hour, weekly, and monthly windows; the plan
+line reads "Go".
+
 Refresh manually with `omarchy-shell omarchy.agents refresh`; normal
 refreshes use the panel's configured interval. The bundled collector can
-also be run directly with `bin/omarchy-agent-usage-grok` (JSON output) or
-`bin/omarchy-agent-usage-grok --write` (update the panel's usage record).
+also be run directly with `bin/omarchy-agent-usage-grok` or
+`bin/omarchy-agent-usage-opencode` (JSON output) or `--write` (update the
+panel's usage record).
 
 One bar icon and one panel for every AI coding subscription on the machine.
 The panel is strictly a display: it watches the usage records that
@@ -70,10 +76,12 @@ light surfaces — and the bar glyph stands in when there is none.
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
 | `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
 | `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
+| `opencode` | The Console usage endpoint: 5-hour, weekly, and monthly Go allowances | `~/.local/share/opencode/opencode.db` messages on the Console providers (both storage generations) |
 
 Claude limits need a signed-in CLI; without credentials the panel says so and
 falls back to local stats only. A non-default Claude directory is honored via
-`CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`. Fireworks reads
+`CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`, and OpenCode's database via
+`OPENCODE_DB`. Fireworks reads
 `FIREWORKS_API_KEY` and `FIREWORKS_ACCOUNT_ID` first, then
 `~/.fireworks/auth.ini` (which `firectl set-api-key` creates), then the key
 opencode stores in `~/.local/share/opencode/auth.json` when Fireworks is
@@ -106,6 +114,24 @@ period. `accountId` only matters when one API key can access several
 accounts. Without a configured `fundedAmount` the tab still shows token
 usage, just no balance. With a live ledger, `fundedAmount` is optional and
 only adds the meter and the spent-of-funded line under the real figure.
+
+### OpenCode Go
+
+The collector probes `https://opencode.ai/zen/go/v1/usage` with the Console
+sign-in OpenCode already stores, so a machine that can use Go in OpenCode
+shows its allowance without a second login. The token is read, never
+refreshed: OpenCode rotates its own, and a refresh here would sign the CLI
+out. Sources are tried in order until one answers — an `opencode-go` then
+`opencode` key in `~/.local/share/opencode/auth.json`, the Console credential
+in the CLI's database, then `OPENCODE_API_KEY`.
+
+Only the `opencode` and `opencode-go` providers count as local usage; a
+session that ran on another provider belongs to that provider's own tab.
+`opencode` covers the pay-as-you-go and free models, so a machine without a
+Go subscription still gets today's tokens, the week, and the all-time model
+breakdown, just no limits. A 401 says the sign-in expired, a 403 that the
+sign-in has no Go subscription, and a failed probe keeps the last allowance
+on screen while the panel retries.
 
 ## Interactions
 

@@ -1,0 +1,301 @@
+#!/bin/bash
+
+# OpenCode usage collector for the Omarchy agents panel.
+#
+# Prints one record in the omarchy-agent-usage-<agent> contract for the
+# OpenCode CLI: local stats from the OpenCode database (both storage
+# generations, the v2 `session_message` table and the older `message` one),
+# plus the OpenCode Go allowance when this machine is signed in to the
+# Console.
+#
+#   omarchy-agent-usage-opencode          print the record
+#   omarchy-agent-usage-opencode --write  write it to the agents usage directory
+#   omarchy-agent-usage-opencode --limits-only
+#                                         reuse the last stats, refresh limits only
+#
+# Only the two Console providers count: "opencode" (pay-as-you-go and free
+# models) and "opencode-go" (the subscription). A sign-in is read, never
+# refreshed: OpenCode rotates its own tokens, and refreshing here would log
+# the CLI out.
+
+set -euo pipefail
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+db="${OPENCODE_DB:-$data_dir/opencode.db}"
+auth_file="$data_dir/auth.json"
+usage_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+record_file="$usage_dir/opencode.json"
+usage_endpoint="${OPENCODE_GO_USAGE_ENDPOINT:-https://opencode.ai/zen/go/v1/usage}"
+
+write=false
+limits_only=false
+for arg in "$@"; do
+  case "$arg" in
+  --write) write=true ;;
+  --limits-only) limits_only=true ;;
+  --force) ;;
+  esac
+done
+
+# ---------------------------------------------------------------- sign-in
+
+# Every Console credential on this machine, most specific first: an explicit
+# Go key, the Zen key, the Console sign-in OpenCode itself keeps in its
+# database, then the variable OpenCode reads.
+tokens=()
+add_token() {
+  local token="$1" existing
+  [[ -z $token ]] && return 0
+  for existing in ${tokens[@]+"${tokens[@]}"}; do
+    [[ $existing == "$token" ]] && return 0
+  done
+  tokens+=("$token")
+}
+
+if [[ -f $auth_file ]] && jq -e . >/dev/null 2>&1 "$auth_file"; then
+  add_token "$(jq -r '."opencode-go".key // empty' "$auth_file" 2>/dev/null || true)"
+  add_token "$(jq -r '."opencode".key // empty' "$auth_file" 2>/dev/null || true)"
+fi
+
+has_db=false
+if [[ -f $db ]]; then
+  has_db=true
+  # The v2 credential store holds the Console sign-in as OAuth (`access`), or
+  # an API key (`key`) when one was pasted instead.
+  while IFS= read -r token; do
+    add_token "$token"
+  done < <(
+    sqlite3 -readonly -cmd '.timeout 2000' "$db" "
+      SELECT CASE
+        WHEN json_valid(value) THEN COALESCE(json_extract(value, '\$.key'), json_extract(value, '\$.access'))
+      END
+      FROM credential
+      WHERE integration_id IN ('opencode-go', 'opencode')
+        AND COALESCE(active, 1) = 1
+      ORDER BY CASE integration_id WHEN 'opencode-go' THEN 0 ELSE 1 END, time_updated DESC
+    " 2>/dev/null || true
+  )
+fi
+
+add_token "${OPENCODE_API_KEY:-}"
+
+limits='[]'
+status_text=''
+help_text='Sign in to the OpenCode Console to show Go limits.'
+retry_advised=false
+answered=false
+
+last_code=''
+last_body=''
+for token in ${tokens[@]+"${tokens[@]}"}; do
+  if ! response=$(printf 'Authorization: Bearer %s\n' "$token" | curl \
+    --silent --show-error --max-time 15 --header @- --header 'accept: application/json' \
+    --write-out '\n%{http_code}' "$usage_endpoint" 2>/dev/null); then
+    last_code=''
+    last_body=''
+    continue
+  fi
+  last_code="${response##*$'\n'}"
+  last_body="${response%$'\n'*}"
+  [[ $last_code == 200 ]] && break
+done
+
+if [[ $last_code == 200 ]]; then
+  if parsed=$(jq -c '
+    .usage as $u
+    | [
+        { label: "5-hour session", title: "Session", bucket: $u.rolling },
+        { label: "Weekly", title: "Weekly", bucket: $u.weekly },
+        { label: "Monthly", title: "Monthly", bucket: $u.monthly }
+      ]
+    | map(
+        select(.bucket.percent | type == "number" and . >= 0)
+        | { label, title, percent: ([.bucket.percent / 100, 0] | max | [., 1] | min), resetsAt: (.bucket.resetsAt // "") }
+      )
+    ' <<<"$last_body" 2>/dev/null); then
+    limits="$parsed"
+    status_text=''
+    help_text=''
+    answered=true
+  fi
+fi
+
+if [[ $answered == false ]]; then
+  case "$last_code" in
+  401)
+    status_text='Sign-in expired'
+    help_text='Open OpenCode and sign in to the Console again.'
+    ;;
+  403)
+    status_text='No Go subscription'
+    help_text='OpenCode answered 403 for this sign-in. Subscribe at https://opencode.ai/go, or use a Console key with Usage read access.'
+    ;;
+  200)
+    status_text='OpenCode limits unavailable'
+    help_text='OpenCode answered without an allowance. Retrying shortly.'
+    retry_advised=true
+    ;;
+  429)
+    status_text='OpenCode limits unavailable'
+    help_text='OpenCode is rate limiting usage checks right now. Retrying shortly.'
+    retry_advised=true
+    ;;
+  '')
+    if (( ${#tokens[@]} > 0 )); then
+      status_text='OpenCode limits unavailable'
+      help_text="Couldn't reach the OpenCode usage endpoint. Retrying shortly."
+      retry_advised=true
+    fi
+    ;;
+  *)
+    status_text='OpenCode limits unavailable'
+    help_text="OpenCode's usage endpoint returned status $last_code. Retrying shortly."
+    retry_advised=true
+    ;;
+  esac
+  # A failed probe keeps the last allowance on screen rather than blanking a
+  # meter that was right a minute ago.
+  if [[ $retry_advised == true && -f $record_file ]]; then
+    limits=$(jq -c '.limits // []' "$record_file" 2>/dev/null || printf '[]')
+  fi
+fi
+
+# ---------------------------------------------------------------- local stats
+
+stats='null'
+if [[ $limits_only == true && -f $record_file ]] \
+  && jq -e '((.totalPrompts // 0) > 0) or ((.todayPrompts // 0) > 0)' "$record_file" >/dev/null 2>&1; then
+  stats=$(jq -c '
+    { todayPrompts, todaySessions, todayTotalTokens, todayTokensByModel, recentDays,
+      totalPrompts, totalSessions, activeDays, activeDates, modelUsage }
+  ' "$record_file" 2>/dev/null || printf 'null')
+fi
+
+if [[ $stats == 'null' && $has_db == true ]]; then
+  has_v2=false
+  if [[ $(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_v2';" 2>/dev/null) == 1 ]]; then
+    has_v2=true
+  fi
+  # Without a session_v2 table there is nothing to exclude from the old one.
+  v1_exclusion=""
+  [[ $has_v2 == true ]] && v1_exclusion="AND session_id NOT IN (SELECT id FROM session_v2)"
+
+  rows=$(
+    {
+      if [[ $has_v2 == true ]]; then
+        sqlite3 -readonly -cmd '.timeout 2000' "$db" "
+          SELECT json_object(
+            'session', session_id,
+            'provider', CASE WHEN json_valid(data) THEN json_extract(data, '\$.model.providerID') END,
+            'model', CASE WHEN json_valid(data) THEN json_extract(data, '\$.model.id') END,
+            'tokens', CASE WHEN json_valid(data) THEN json_extract(data, '\$.tokens') END,
+            'created', CASE WHEN json_valid(data) THEN json_extract(data, '\$.time.created') END,
+            'fallback', time_created
+          )
+          FROM session_message
+          WHERE type = 'assistant'
+            AND CASE WHEN json_valid(data) THEN json_extract(data, '\$.model.providerID') END
+              IN ('opencode', 'opencode-go')
+        " 2>/dev/null || true
+      fi
+      # The v1 table covers whatever the v2 migration did not move. A session
+      # present in both would otherwise be counted twice.
+      sqlite3 -readonly -cmd '.timeout 2000' "$db" "
+        SELECT json_object(
+          'session', session_id,
+          'provider', json_extract(data, '\$.providerID'),
+          'model', json_extract(data, '\$.modelID'),
+          'tokens', json_extract(data, '\$.tokens'),
+          'created', json_extract(data, '\$.time.created'),
+          'fallback', time_created
+        )
+        FROM message
+        WHERE json_valid(data)
+          AND json_extract(data, '\$.role') = 'assistant'
+          AND json_extract(data, '\$.providerID') IN ('opencode', 'opencode-go')
+          $v1_exclusion
+      " 2>/dev/null || true
+    }
+  )
+
+  stats=$(jq -cs \
+    --arg today "$(date +%F)" \
+    --argjson days "$(for i in 6 5 4 3 2 1 0; do date -d "-$i day" +%F; done | jq -R . | jq -s .)" '
+    # opencode keeps thinking tokens out of output; both are generated.
+    # A message with no billed tokens (an aborted step) is not usage.
+    map(
+      (.tokens // {}) as $t
+      | (.tokens.cache // {}) as $c
+      | {
+          session: ("opencode:" + (.session // "")),
+          model: ((.model // "opencode") | tostring | rtrimstr("/")),
+          input: ($t.input // 0),
+          output: (($t.output // 0) + ($t.reasoning // 0)),
+          cacheRead: ($c.read // 0),
+          cacheWrite: ($c.write // 0),
+          day: (((.created // .fallback // 0) / 1000) | localtime | strftime("%Y-%m-%d"))
+        }
+    )
+    | map(. + { total: (.input + .output + .cacheRead + .cacheWrite) })
+    | map(select(.total > 0))
+    | . as $usage
+    | [$usage[] | select(.day == $today)] as $todayUsage
+    | {
+        todayPrompts: ($todayUsage | length),
+        todaySessions: ($todayUsage | map(.session) | unique | length),
+        todayTotalTokens: ($todayUsage | map(.total) | add // 0),
+        todayTokensByModel: (
+          reduce $todayUsage[] as $m ({}; .[$m.model] += $m.total)
+        ),
+        recentDays: [
+          $days[] as $day
+          | { date: $day, messageCount: ([$usage[] | select(.day == $day) | .total] | add // 0) }
+        ],
+        totalPrompts: ($usage | length),
+        totalSessions: ($usage | map(.session) | unique | length),
+        activeDays: ($usage | map(.day) | unique | length),
+        activeDates: ($usage | map(.day) | unique),
+        modelUsage: (
+          reduce $usage[] as $m ({};
+            .[$m.model].inputTokens += $m.input
+            | .[$m.model].outputTokens += $m.output
+            | .[$m.model].cacheReadInputTokens += $m.cacheRead
+            | .[$m.model].cacheCreationInputTokens += $m.cacheWrite)
+        )
+      }
+  ' <<<"$rows")
+fi
+
+# ---------------------------------------------------------------- record
+
+record=$(jq -cn \
+  --arg now "$(date -u +%FT%TZ)" \
+  --argjson stats "${stats:-null}" \
+  --argjson limits "$limits" \
+  --arg status "$status_text" \
+  --arg help "$help_text" \
+  --argjson retry "$retry_advised" '
+  {
+    schemaVersion: 1,
+    id: "opencode",
+    name: "OpenCode",
+    updatedAt: $now,
+    ready: ((($limits | length) > 0) or (($stats.totalPrompts // 0) > 0) or (($stats.todayPrompts // 0) > 0)),
+    hasLocalStats: (($stats.totalPrompts // 0) > 0),
+    tierLabel: "Go",
+    usageStatusText: $status,
+    authHelpText: $help,
+    limits: $limits,
+    retryAdvised: $retry
+  } + ($stats // {})
+')
+
+if [[ $write == false ]]; then
+  printf '%s\n' "$record"
+  exit 0
+fi
+
+mkdir -p "$usage_dir"
+tmp=$(mktemp "$usage_dir/.opencode.XXXXXX")
+printf '%s\n' "$record" >"$tmp"
+mv "$tmp" "$record_file"
