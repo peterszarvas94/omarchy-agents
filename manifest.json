@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Omarchy",
   "license": "MIT",
-  "description": "Claude Code, Codex, Fireworks, and Grok usage, limits, and pace in a native Omarchy bar panel.",
+  "description": "Claude Code, Codex, Fireworks, Grok, and OpenCode usage, limits, and pace in a native Omarchy bar panel.",
   "kinds": [
     "bar-widget"
   ],
@@ -34,6 +34,9 @@
           "enabled": true
         },
         "grok": {
+          "enabled": true
+        },
+        "opencode": {
           "enabled": true
         }
       },
