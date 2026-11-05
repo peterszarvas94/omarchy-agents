@@ -12,6 +12,10 @@ Item {
 
   property var settings: ({})
 
+  // Only these three subscriptions earn a tab in this panel. Everything else
+  // the stock collectors discover stays hidden and is skipped on refresh.
+  readonly property var agentAllowlist: ["claude", "codex", "opencode"]
+
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
 
@@ -151,6 +155,11 @@ Item {
     for (var id in providers) {
       if (providers[id] && providers[id].enabled === false) command.push("--except", id)
     }
+    // Skip collectors for agents this panel does not show.
+    for (var a = 0; a < agents.length; a++) {
+      var discovered = agents[a] && agents[a].record ? String(agents[a].record.id || "") : ""
+      if (discovered !== "" && agentAllowlist.indexOf(discovered) === -1) command.push("--except", discovered)
+    }
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) command.push(agentIds[i])
     }
@@ -210,6 +219,7 @@ Item {
   }
 
   function providerEnabled(id) {
+    if (agentAllowlist.indexOf(id) === -1) return false
     if (!settings || !settings.providers || !settings.providers[id]) return true
     return settings.providers[id].enabled !== false
   }

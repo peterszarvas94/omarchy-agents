@@ -1,14 +1,8 @@
 # Agents
 
-This is the `peti.agents` clone of the stock Omarchy plugin. Its bundled
-updater runs the stock collectors and adds Grok Build usage from
-`~/.grok/sessions/**/usage.json` (or `$GROK_HOME/sessions`). Grok shows
-today's tokens, prompts and sessions, the last seven days, and all-time
-model totals. The weekly account allowance comes from Grok's billing
-endpoint using the existing Grok Build sign-in in `auth.json`. The plan
-label comes from the local settings cache. Open Grok Build to refresh an
-expired sign-in.
-The stock plugin stays unchanged.
+This is the `peti.agents` clone of the stock Omarchy plugin. It keeps only
+three subscriptions on the panel — Claude Code, Codex, and OpenCode — and
+skips the rest of the stock collectors.
 
 OpenCode usage comes from the CLI's own database, and the OpenCode Go
 allowance from the Console usage endpoint, reusing the Console sign-in the
@@ -17,9 +11,8 @@ line reads "Go".
 
 Refresh manually with `omarchy-shell omarchy.agents refresh`; normal
 refreshes use the panel's configured interval. The bundled collector can
-also be run directly with `bin/omarchy-agent-usage-grok` or
-`bin/omarchy-agent-usage-opencode` (JSON output) or `--write` (update the
-panel's usage record).
+also be run directly with `bin/omarchy-agent-usage-opencode` (JSON output) or
+`--write` (update the panel's usage record).
 
 One bar icon and one panel for every AI coding subscription on the machine.
 The panel is strictly a display: it watches the usage records that
@@ -46,8 +39,10 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
   the same way the weekly chart scales to its busiest day. Hover for the
   input / output / cache split.
 
-A subscription appears only when it is enabled in settings and has actually
-recorded usage — on this machine or on a synced one. With one such agent
+Only Claude Code, Codex, and OpenCode are considered; every other record the
+stock collectors write is ignored. A subscription appears only when it is
+enabled in settings and has actually recorded usage — on this machine or on a
+synced one. With one such agent
 there is no switch row at all; with none, the module leaves the bar entirely
 rather than sitting there with nothing to say. A CLI installed mid-session
 shows up at the next refresh, so nothing polls the disk waiting for it.
@@ -75,45 +70,12 @@ light surfaces — and the bar glyph stands in when there is none.
 |---|---|---|
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
 | `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
-| `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
 | `opencode` | The Console usage endpoint: 5-hour, weekly, and monthly Go allowances | `~/.local/share/opencode/opencode.db` messages on the Console providers (both storage generations) |
 
 Claude limits need a signed-in CLI; without credentials the panel says so and
 falls back to local stats only. A non-default Claude directory is honored via
 `CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`, and OpenCode's database via
-`OPENCODE_DB`. Fireworks reads
-`FIREWORKS_API_KEY` and `FIREWORKS_ACCOUNT_ID` first, then
-`~/.fireworks/auth.ini` (which `firectl set-api-key` creates), then the key
-opencode stores in `~/.local/share/opencode/auth.json` when Fireworks is
-signed in there.
-
-### Fireworks balance
-
-The collector first asks the account's `:getBalance` endpoint for the real
-prepaid ledger. That endpoint exists but is permission-gated, and as of
-August 2026 no console-issued API key passes it — Fireworks appears to
-reserve it for the dashboard session. The probe stays because it is cheap
-and the live figure lights up automatically if Fireworks ever opens it to
-keys. Until then the collector falls back to estimating the balance from
-configuration in `~/.config/omarchy/agents/fireworks.json`:
-
-```json
-{
-  "accountId": "",
-  "fundedAmount": 20,
-  "fundedAt": "2026-07-01"
-}
-```
-
-Set `fundedAmount` to the credits purchased and optionally `fundedAt` to the
-purchase date; with no date, the collector uses the account creation time. It
-subtracts rated account costs and the panel labels the result as estimated.
-For a later top-up, increase `fundedAmount` by the new credit while keeping
-the original `fundedAt`, so both the funding and spend still cover the same
-period. `accountId` only matters when one API key can access several
-accounts. Without a configured `fundedAmount` the tab still shows token
-usage, just no balance. With a live ledger, `fundedAmount` is optional and
-only adds the meter and the spent-of-funded line under the real figure.
+`OPENCODE_DB`.
 
 ### OpenCode Go
 
@@ -166,10 +128,10 @@ than walking a dotted path — so pass the whole `providers` object as JSON (or
 edit `shell.json` directly):
 
 ```bash
-omarchy bar set omarchy.agents providers '{
+omarchy bar set peti.agents providers '{
   "claude": { "enabled": true },
-  "codex": { "enabled": false },
-  "fireworks": { "enabled": true }
+  "codex": { "enabled": true },
+  "opencode": { "enabled": true }
 }' --json
 ```
 
