@@ -12,9 +12,9 @@ Item {
 
   property var settings: ({})
 
-  // Only these three subscriptions earn a tab in this panel. Everything else
+  // Only these four subscriptions earn a tab in this panel. Everything else
   // the stock collectors discover stays hidden and is skipped on refresh.
-  readonly property var agentAllowlist: ["claude", "codex", "opencode"]
+  readonly property var agentAllowlist: ["claude", "codex", "grok", "opencode"]
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"

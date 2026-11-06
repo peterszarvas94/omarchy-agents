@@ -1,8 +1,15 @@
 # Agents
 
 This is the `peti.agents` clone of the stock Omarchy plugin. It keeps only
-three subscriptions on the panel — Claude Code, Codex, and OpenCode — and
-skips the rest of the stock collectors.
+four subscriptions on the panel — Claude Code, Codex, Grok, and OpenCode —
+and skips the rest of the stock collectors.
+
+Grok Build usage comes from `~/.grok/sessions/**/usage.json` (or
+`$GROK_HOME/sessions`). Grok shows today's tokens, prompts and sessions, the
+last seven days, and all-time model totals. The account allowance comes from
+Grok's billing endpoint using the existing Grok Build sign-in in `auth.json`.
+The plan label comes from the local settings cache. Open Grok Build to refresh
+an expired sign-in.
 
 OpenCode usage comes from the CLI's own database, and the OpenCode Go
 allowance from the Console usage endpoint, reusing the Console sign-in the
@@ -10,9 +17,10 @@ CLI already has. Go shows the 5-hour, weekly, and monthly windows; the plan
 line reads "Go".
 
 Refresh manually with `omarchy-shell omarchy.agents refresh`; normal
-refreshes use the panel's configured interval. The bundled collector can
-also be run directly with `bin/omarchy-agent-usage-opencode` (JSON output) or
-`--write` (update the panel's usage record).
+refreshes use the panel's configured interval. The bundled collectors can
+also be run directly with `bin/omarchy-agent-usage-grok` or
+`bin/omarchy-agent-usage-opencode` (JSON output) or `--write` (update the
+panel's usage record).
 
 One bar icon and one panel for every AI coding subscription on the machine.
 The panel is strictly a display: it watches the usage records that
@@ -39,8 +47,8 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
   the same way the weekly chart scales to its busiest day. Hover for the
   input / output / cache split.
 
-Only Claude Code, Codex, and OpenCode are considered; every other record the
-stock collectors write is ignored. A subscription appears only when it is
+Only Claude Code, Codex, Grok, and OpenCode are considered; every other record
+the stock collectors write is ignored. A subscription appears only when it is
 enabled in settings and has actually recorded usage — on this machine or on a
 synced one. With one such agent
 there is no switch row at all; with none, the module leaves the bar entirely
@@ -60,9 +68,9 @@ written by `omarchy-agent-usage-update`. That command runs one
 on its refresh timer and whenever you ask for a refresh, and picks up any
 record that lands in the directory regardless of who wrote it.
 
-Adding an agent therefore never touches this plugin: ship a collector that
-prints the record contract (see the `claude` and `codex` collectors in
-`bin/`), and the panel gains a tab. An `assets/<id>.svg` mark is optional —
+Adding another agent means allowlisting it in `Main.qml` and shipping a
+collector that prints the record contract (see the `claude` and `codex`
+collectors in `bin/`). An `assets/<id>.svg` mark is optional —
 with an `assets/<id>-light.svg` twin if the mark needs a dark variant for
 light surfaces — and the bar glyph stands in when there is none.
 
@@ -70,12 +78,13 @@ light surfaces — and the bar glyph stands in when there is none.
 |---|---|---|
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
 | `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
+| `grok` | Grok's billing endpoint | `~/.grok/sessions` usage records |
 | `opencode` | The Console usage endpoint: 5-hour, weekly, and monthly Go allowances | `~/.local/share/opencode/opencode.db` messages on the Console providers (both storage generations) |
 
 Claude limits need a signed-in CLI; without credentials the panel says so and
 falls back to local stats only. A non-default Claude directory is honored via
-`CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`, and OpenCode's database via
-`OPENCODE_DB`.
+`CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`, Grok via `GROK_HOME`, and
+OpenCode's database via `OPENCODE_DB`.
 
 ### OpenCode Go
 
@@ -131,6 +140,7 @@ edit `shell.json` directly):
 omarchy bar set peti.agents providers '{
   "claude": { "enabled": true },
   "codex": { "enabled": true },
+  "grok": { "enabled": true },
   "opencode": { "enabled": true }
 }' --json
 ```
