@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# Grok Build usage collector for the Omarchy agents panel.
+#
+# Prints one record in the omarchy-agent-usage-<agent> contract, built from
+# the per-session usage.json files Grok Build persists under
+# ~/.grok/sessions/<cwd>/<session>/, plus account-wide subscription usage.
+#
+#   omarchy-agent-usage-grok          print the record
+#   omarchy-agent-usage-grok --write  write it to the agents usage directory
+
+set -euo pipefail
+
+GROK_HOME="${GROK_HOME:-$HOME/.grok}"
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+
+write=false
+limits_only=false
+for arg in "$@"; do
+  [[ $arg == "--write" ]] && write=true
+  [[ $arg == "--limits-only" ]] && limits_only=true
+done
+
+billing=$("$(dirname "$(readlink -f "$0")")/grok-billing")
+
+tier=""
+if [[ -f $GROK_HOME/settings_cache.json ]]; then
+  tier=$(jq -r '.payload | fromjson | .settings.subscription_tier_display // empty' "$GROK_HOME/settings_cache.json" 2>/dev/null || true)
+fi
+
+ready=false
+[[ -f $GROK_HOME/auth.json ]] && ready=true
+
+if [[ $limits_only == true && -f $USAGE_DIR/grok.json ]]; then
+  record=$(cat "$USAGE_DIR/grok.json")
+else
+record=$(
+  { if [[ -d $GROK_HOME/sessions ]]; then find "$GROK_HOME/sessions" -type f -name usage.json -print0; fi; } |
+    xargs -0 -r cat |
+    jq -s \
+      --arg today "$(date +%F)" \
+      --arg now "$(date -u +%FT%T+00:00)" \
+      --arg tier "$tier" \
+      --argjson ready "$ready" \
+      --argjson days "$(for i in 6 5 4 3 2 1 0; do date -d "-$i day" +%F; done | jq -R . | jq -s .)" '
+      # Grok stamps turns in UTC with nanoseconds; drop the fraction so jq can
+      # parse it, then bucket by the local calendar day.
+      def localday: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601 | localtime | strftime("%Y-%m-%d");
+
+      [ .[] | .sessionId as $sid | (.turns // [])[] | . + {sid: $sid, day: (.endedAt | localday)} ] as $turns
+      | ($turns | map(select(.day == $today))) as $todayTurns
+      | {
+          schemaVersion: 1,
+          id: "grok",
+          name: "Grok",
+          updatedAt: $now,
+          ready: $ready,
+          hasLocalStats: ($turns | length > 0),
+          tierLabel: $tier,
+          usageStatusText: "",
+          authHelpText: "Run `grok login` to authenticate.",
+          limits: [],
+          todayPrompts: ($todayTurns | length),
+          todaySessions: ($todayTurns | map(.sid) | unique | length),
+          todayTotalTokens: ($todayTurns | map(.totalTokens // 0) | add // 0),
+          todayTokensByModel: (
+            reduce ($todayTurns[] | (.modelUsage // {}) | to_entries[]) as $m ({};
+              .[$m.key] += ($m.value.totalTokens // 0))
+          ),
+          recentDays: [
+            $days[] as $d
+            | {date: $d, messageCount: ($turns | map(select(.day == $d) | .totalTokens // 0) | add // 0)}
+          ],
+          totalPrompts: ($turns | length),
+          totalSessions: ($turns | map(.sid) | unique | length),
+          activeDays: ($turns | map(.day) | unique | length),
+          activeDates: ($turns | map(.day) | unique),
+          modelUsage: (
+            reduce ($turns[] | (.modelUsage // {}) | to_entries[]) as $m ({};
+              .[$m.key].inputTokens += (($m.value.inputTokens // 0) - ($m.value.cachedReadTokens // 0))
+              | .[$m.key].outputTokens += ($m.value.outputTokens // 0)
+              | .[$m.key].cacheReadInputTokens += ($m.value.cachedReadTokens // 0)
+              | .[$m.key].cacheCreationInputTokens += ($m.value.cacheCreationTokens // 0))
+          )
+        }'
+)
+fi
+
+record=$(jq --argjson billing "$billing" --arg tier "$tier" --argjson ready "$ready" \
+  --arg now "$(date -u +%FT%T+00:00)" '
+    . + $billing + {updatedAt: $now, ready: $ready, tierLabel: $tier}
+  ' <<<"$record")
+
+if [[ $write == false ]]; then
+  printf '%s\n' "$record"
+  exit 0
+fi
+
+mkdir -p "$USAGE_DIR"
+tmp=$(mktemp "$USAGE_DIR/.grok.XXXXXX")
+printf '%s\n' "$record" >"$tmp"
+mv "$tmp" "$USAGE_DIR/grok.json"
